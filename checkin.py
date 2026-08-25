@@ -6,7 +6,8 @@
 功能：
 - 全自动签到
 - 精准获取当前积分 (Points)
-- PushPlus 微信推送（包含积分、剩余天数、签到结果）
+- 积分达标自动兑换会员天数（默认 500 分兑换 100 天，可配置/关闭）
+- PushPlus 微信推送（包含积分、剩余天数、签到结果、兑换结果）
 - 智能多域名切换 (优先 glados.cloud)
 - 支持 Cookie-Editor 导出格式
 """
@@ -44,6 +45,17 @@ NORMAL_CHECKIN_MESSAGES = (
     "checkin repeats! please try tomorrow",
     "today's observation logged",
 )
+
+# 积分兑换计划 (#11)：消耗 points 积分兑换 days 天会员。
+# 通过环境变量 EXCHANGE_PLAN 选择，默认 plan500（500 分兑换 100 天），
+# 设为 off 关闭自动兑换。
+EXCHANGE_PLANS = {
+    "plan100": {"points": 100, "days": 10},
+    "plan200": {"points": 200, "days": 30},
+    "plan500": {"points": 500, "days": 100},
+}
+
+EXCHANGE_DISABLED_VALUES = ("", "off", "no", "none", "false", "0", "disabled")
 
 # ================= 工具函数 =================
 
@@ -128,10 +140,11 @@ class GLaDOS:
         self.points = "?"
         self.points_change = "?"
         self.exchange_info = ""
+        self.exchange_result = ""
         self.plan = "?"
-        
-    def req(self, method, path, data=None):
-        """带自动域名切换的请求"""
+
+    def req(self, method, path, data=None, form=False):
+        """带自动域名切换的请求；form=True 时以表单提交（兑换接口要求）"""
         for d in DOMAINS:
             try:
                 url = f"{d}{path}"
@@ -139,12 +152,17 @@ class GLaDOS:
                 h['Cookie'] = self.cookie
                 h['Origin'] = d
                 h['Referer'] = f"{d}/console/checkin"
-                
-                if method == 'GET':
+
+                if form:
+                    # 表单提交交给 requests 自动设置 Content-Type，
+                    # 手动预设 JSON 头会被兑换接口拒绝。
+                    h.pop('Content-Type', None)
+                    resp = requests.post(url, headers=h, data=data, timeout=10)
+                elif method == 'GET':
                     resp = requests.get(url, headers=h, timeout=10)
                 else:
                     resp = requests.post(url, headers=h, json=data, timeout=10)
-                
+
                 if resp.status_code == 200:
                     self.domain = d # Remember working domain
                     return resp.json()
@@ -198,6 +216,49 @@ class GLaDOS:
     def checkin(self):
         """执行签到"""
         return self.req('POST', '/api/user/checkin', {'token': 'glados.cloud'})
+
+    def exchange(self, plan):
+        """兑换会员天数：表单提交 planType (plan100/plan200/plan500)"""
+        return self.req('POST', '/api/user/exchange', {'planType': plan}, form=True)
+
+# ================= 自动兑换 (#11) =================
+
+def get_exchange_plan():
+    """读取自动兑换配置，返回计划 ID；关闭或无效时返回 None"""
+    raw = os.environ.get("EXCHANGE_PLAN", "plan500").strip().lower()
+    if raw in EXCHANGE_DISABLED_VALUES:
+        return None
+    if raw in EXCHANGE_PLANS:
+        return raw
+    log(f"⚠️ EXCHANGE_PLAN 值 '{raw}' 无效 (可选: {'/'.join(EXCHANGE_PLANS)}/off)，本次跳过兑换")
+    return None
+
+
+def auto_exchange(g, plan_id):
+    """积分达标时自动兑换会员天数，返回用于推送的兑换说明"""
+    info = EXCHANGE_PLANS[plan_id]
+    need, days = info["points"], info["days"]
+
+    try:
+        pts = int(float(g.points))
+    except (TypeError, ValueError):
+        log("⚠️ 积分查询失败，跳过兑换")
+        return "⚠️ 兑换跳过(积分查询失败)"
+
+    if pts < need:
+        return f"⏭️ 积分不足({pts}/{need})，攒够自动兑换{days}天"
+
+    res = g.exchange(plan_id)
+    if res and res.get('code') == 0:
+        log(f"🎁 自动兑换成功: {need}分 → +{days}天")
+        # 兑换消耗积分、增加天数，刷新后推送里才是最新数据
+        g.get_status()
+        g.get_points()
+        return f"🎁 兑换成功 +{days}天 (消耗{need}分)"
+
+    err = res.get('message', 'Failure') if res else "Network Error"
+    log(f"⚠️ 自动兑换失败: {err}")
+    return f"⚠️ 兑换失败({err})"
 
 # ================= 主程序 =================
 
@@ -273,39 +334,58 @@ def main():
     cookies = get_cookies()
     if not cookies:
         return 1
-    
+
+    exchange_plan = get_exchange_plan()
+    if exchange_plan:
+        plan = EXCHANGE_PLANS[exchange_plan]
+        log(f"🎁 自动兑换已启用: {plan['points']}分 → {plan['days']}天 (EXCHANGE_PLAN={exchange_plan})")
+    else:
+        log("⏭️ 自动兑换未启用")
+
     results = []
     success_cnt = 0
-    
+    exchange_events = 0
+
     for i, cookie in enumerate(cookies, 1):
         g = GLaDOS(cookie)
-        
+
         # 1. Checkin
         attempts = int(os.environ.get("CHECKIN_MAX_ATTEMPTS", "3"))
         delay_seconds = int(os.environ.get("CHECKIN_RETRY_DELAY_SECONDS", "60"))
         res, is_success = checkin_with_retry(g, attempts, delay_seconds)
         msg = res.get('message', 'Failure') if res else "Network Error"
-        
+
         # 2. Get Info (Refresh data)
         g.get_status()
         g.get_points()
-        
+
+        # 2.5 Auto exchange (issue #11): runs after check-in so the
+        # just-earned points count toward the threshold.
+        if exchange_plan:
+            g.exchange_result = auto_exchange(g, exchange_plan)
+            if not g.exchange_result.startswith("⏭️"):
+                exchange_events += 1
+
         # 3. Log
         status_icon = "✅" if is_success else "❌"
         # Actions logs are public in a public repository. Keep account details
         # inside the private notification instead of exposing the email here.
         log(f"{status_icon} 账号 {i} | 积分: {g.points} | 天数: {g.left_days} | 结果: {msg}")
-        
+
         if is_success:
             success_cnt += 1
-        
+
         # 4. Result Formatting
+        exchange_line = ""
+        if exchange_plan:
+            exchange_line = f"""
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>自动兑换:</b> {html.escape(g.exchange_result)}</p>"""
         results.append(f"""
 <div style="border:2px solid #333; padding:15px; margin-bottom:15px; border-radius:10px; background:#fff;">
     <h3 style="margin:0 0 15px 0; color:#333; border-bottom:2px solid #333; padding-bottom:8px;">👤 {html.escape(str(g.email))}</h3>
     <p style="margin:8px 0; color:#000; font-size:16px;"><b>当前积分:</b> <span style="color:#e74c3c; font-size:22px; font-weight:bold;">{g.points}</span> <span style="color:#27ae60; font-weight:bold;">({g.points_change})</span></p>
     <p style="margin:8px 0; color:#000; font-size:16px;"><b>剩余天数:</b> <span style="font-weight:bold;">{g.left_days} 天</span></p>
-    <p style="margin:8px 0; color:#000; font-size:16px;"><b>签到结果:</b> {html.escape(str(msg))}</p>
+    <p style="margin:8px 0; color:#000; font-size:16px;"><b>签到结果:</b> {html.escape(str(msg))}</p>{exchange_line}
     <div style="margin-top:15px; padding:12px; background:#f0f0f0; border-radius:8px; border:1px solid #ccc;">
         <p style="margin:0 0 8px 0; color:#333; font-weight:bold; font-size:15px;">🎁 兑换选项:</p>
         <p style="margin:0; color:#000; font-size:14px; line-height:1.8;">
@@ -316,8 +396,10 @@ def main():
 
     # Push
     push_level = os.environ.get("PUSH_LEVEL", "fail_only").lower()
-    
-    if push_level == "fail_only" and success_cnt == len(cookies):
+
+    # Exchange outcomes (success or failure) are worth notifying even when
+    # PUSH_LEVEL=fail_only, otherwise an always-failing exchange stays silent.
+    if push_level == "fail_only" and success_cnt == len(cookies) and exchange_events == 0:
         log("⏭️ 根据 PUSH_LEVEL=fail_only 设置，所有账号签到成功，跳过推送")
         return 0
 

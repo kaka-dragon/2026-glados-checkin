@@ -157,6 +157,16 @@ GLaDOS 在 2026 年初进行了 API 更新，**绝大多数旧签到脚本已失
 | `TELEGRAM_BOT_TOKEN` | ❌ 否 | Telegram 机器人的 Token（例如 `123456:ABC-DEF1234...`）                    |
 | `TELEGRAM_CHAT_ID`   | ❌ 否 | 接收推送的 Telegram Chat ID                                                |
 | `PUSH_LEVEL`         | ❌ 否 | 推送级别：`fail_only`（默认，仅失败推送）或 `all`（每次均推送）            |
+| `EXCHANGE_PLAN`      | ❌ 否 | 积分自动兑换计划（#11）：`plan500`（默认，500 分自动兑换 100 天）、`plan200`（200 分→30 天）、`plan100`（100 分→10 天）或 `off`（关闭）。兑换结果即使 `PUSH_LEVEL=fail_only` 也会推送。 |
+
+### 🎁 积分自动兑换（#11）
+
+签到攒够积分后自动兑换会员天数，实现无感自动续期：
+
+- 每天签到后检查积分，达到阈值就自动调用 GLaDOS 兑换接口；
+- 默认 **500 分 → 100 天**（`plan500`），无需任何配置即可生效；
+- 想换别的档位或关闭，设置 `EXCHANGE_PLAN` 环境变量（GitHub 上可配在 **Settings → Secrets and variables → Actions → Variables**）；
+- 兑换成功或失败都会推送通知（积分不足时静默跳过，不打扰）。
 
 ---
 

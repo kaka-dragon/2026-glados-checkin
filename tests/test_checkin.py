@@ -55,5 +55,73 @@ class CookieTests(unittest.TestCase):
             self.assertEqual(checkin.get_cookies(), [])
 
 
+class FakeGLaDOS:
+    def __init__(self, points, exchange_response):
+        self.points = points
+        self.exchange_response = exchange_response
+        self.refresh_calls = 0
+
+    def exchange(self, plan):
+        self.plan_sent = plan
+        return self.exchange_response
+
+    def get_status(self):
+        self.refresh_calls += 1
+
+    def get_points(self):
+        self.refresh_calls += 1
+
+
+class ExchangePlanTests(unittest.TestCase):
+    def test_defaults_to_plan500(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(checkin.get_exchange_plan(), 'plan500')
+
+    def test_off_disables_exchange(self):
+        with mock.patch.dict(os.environ, {'EXCHANGE_PLAN': 'off'}):
+            self.assertIsNone(checkin.get_exchange_plan())
+
+    def test_invalid_value_disables_exchange(self):
+        with mock.patch.dict(os.environ, {'EXCHANGE_PLAN': 'plan999'}):
+            self.assertIsNone(checkin.get_exchange_plan())
+
+
+class AutoExchangeTests(unittest.TestCase):
+    def test_exchanges_and_refreshes_when_points_reach_threshold(self):
+        client = FakeGLaDOS('500', {'code': 0, 'message': 'ok'})
+
+        result = checkin.auto_exchange(client, 'plan500')
+
+        self.assertEqual(client.plan_sent, 'plan500')
+        self.assertIn('兑换成功', result)
+        self.assertIn('+100天', result)
+        self.assertEqual(client.refresh_calls, 2)
+
+    def test_skips_when_points_below_threshold(self):
+        client = FakeGLaDOS('499', {'code': 0, 'message': 'ok'})
+
+        result = checkin.auto_exchange(client, 'plan500')
+
+        self.assertFalse(hasattr(client, 'plan_sent'))
+        self.assertIn('积分不足', result)
+
+    def test_reports_failure_without_refresh(self):
+        client = FakeGLaDOS('600', {'code': 1, 'message': 'denied'})
+
+        result = checkin.auto_exchange(client, 'plan500')
+
+        self.assertIn('兑换失败', result)
+        self.assertIn('denied', result)
+        self.assertEqual(client.refresh_calls, 0)
+
+    def test_unreadable_points_is_reported(self):
+        client = FakeGLaDOS('?', {'code': 0, 'message': 'ok'})
+
+        result = checkin.auto_exchange(client, 'plan500')
+
+        self.assertIn('积分查询失败', result)
+        self.assertFalse(hasattr(client, 'plan_sent'))
+
+
 if __name__ == '__main__':
     unittest.main()
