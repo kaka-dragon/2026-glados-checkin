@@ -72,6 +72,21 @@ class CheckinResultTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         sleep.assert_not_called()
 
+    @mock.patch('checkin.time.sleep')
+    def test_automated_detection_without_reason_does_not_retry(self, sleep):
+        failure = {
+            'code': 4,
+            'message': 'Automated check-in detected. Please sign in again to continue.',
+        }
+        client = FakeClient([failure])
+
+        result, success = checkin.checkin_with_retry(client, attempts=3)
+
+        self.assertFalse(success)
+        self.assertEqual(result, failure)
+        self.assertEqual(client.calls, 1)
+        sleep.assert_not_called()
+
 
 class BrowserHeaderTests(unittest.TestCase):
     def test_custom_chrome_user_agent_builds_matching_client_hints(self):
@@ -127,6 +142,50 @@ class CookieTests(unittest.TestCase):
 
         self.assertIn('gld:sess=current', cookie)
         self.assertEqual(checkin.get_session_cookie_kind(cookie), 'gld')
+
+    def test_get_cookies_preserves_formatted_json_as_one_account(self):
+        raw = json.dumps([
+            {'name': 'gld:sess', 'value': 'current'},
+            {'name': 'gld:sess.sig', 'value': 'signature'},
+        ], indent=2)
+
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': raw}):
+            self.assertEqual(
+                checkin.get_cookies(),
+                ['gld:sess=current; gld:sess.sig=signature'],
+            )
+
+    def test_get_cookies_preserves_ampersands_in_json_values(self):
+        raw = json.dumps([
+            {'name': 'gld:sess', 'value': 'current'},
+            {'name': 'gld:sess.sig', 'value': 'signature'},
+            {'name': 'preferences', 'value': 'a&b'},
+        ])
+
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': raw}):
+            self.assertEqual(
+                checkin.get_cookies(),
+                ['gld:sess=current; gld:sess.sig=signature; preferences=a&b'],
+            )
+
+    def test_get_cookies_parses_formatted_legacy_token_json(self):
+        raw = json.dumps({'token': 'legacy'}, indent=2)
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': raw}):
+            self.assertEqual(checkin.get_cookies(), ['koa:sess=legacy'])
+
+    def test_get_cookies_rejects_malformed_json(self):
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': '[\n{\n'}):
+            self.assertEqual(checkin.get_cookies(), [])
+
+    def test_get_cookies_preserves_multiple_cookie_headers(self):
+        cookies = [
+            'gld:sess=first; gld:sess.sig=first-signature',
+            'gld:sess=second; gld:sess.sig=second-signature',
+        ]
+        for separator in ('\n', '&'):
+            with self.subTest(separator=separator):
+                with mock.patch.dict(os.environ, {'GLADOS_COOKIE': separator.join(cookies)}):
+                    self.assertEqual(checkin.get_cookies(), cookies)
 
     def test_cookie_header_prefix_is_removed(self):
         raw = 'Cookie: gld:sess=current; gld:sess.sig=signature'

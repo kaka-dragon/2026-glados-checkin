@@ -140,6 +140,12 @@ def get_cookies():
     if not raw:
         log("❌ 未配置 GLADOS_COOKIE")
         return []
+
+    # A Cookie-Editor export is one JSON document. Its formatting newlines
+    # and ampersands inside values are not account separators.
+    if raw.lstrip().startswith(('{', '[')):
+        cookie = extract_cookie(raw)
+        return [cookie] if cookie else []
     
     # Split by enter or &
     sep = '\n' if '\n' in raw else '&'
@@ -191,6 +197,7 @@ def is_non_retryable_checkin_result(result):
         or '没有权限' in message
         or 'permission' in message
         or 'unauthorized' in message
+        or 'automated check-in detected' in message
     )
 
 

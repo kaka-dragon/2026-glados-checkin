@@ -288,6 +288,9 @@ koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新
 
 其他 Cookie 可以保留；`__stripe_mid` 与签到认证无关，但不会造成问题。
 
+也支持将 Cookie-Editor 导出的 JSON 数组整体保存到 `GLADOS_COOKIE`，可以保留缩进和
+换行；整个数组按一个账号处理。多账号请使用上面的 Cookie 请求头格式，每个账号占一行。
+
 **常见错误**：
 
 - ❌ 仍然只复制 `koa:sess` 与 `koa:sess.sig`
