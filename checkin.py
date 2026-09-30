@@ -284,7 +284,8 @@ class GLaDOS:
                     return resp.json()
                 log(f"⚠️ {d} 返回 HTTP {resp.status_code}")
             except (requests.RequestException, ValueError) as e:
-                log(f"⚠️ {d} 请求失败: {e}")
+                # InvalidHeader and other request errors may embed Cookie values.
+                log(f"⚠️ {d} 请求失败: {type(e).__name__}")
                 continue
         return None
 
@@ -464,6 +465,8 @@ def diagnose_accounts(cookies):
         if authenticated:
             success_cnt += 1
             log(f'✅ 账号 {i}: 登录状态查询成功')
+        elif is_non_retryable_checkin_result(result):
+            log(f'❌ 账号 {i}: 会话认证被拒绝，请重新登录并更新完整 Cookie')
         else:
             log(f'❌ 账号 {i}: 登录状态查询失败，请检查网络并重新登录更新 Cookie')
     log('只读查询通过不代表签到设备校验通过；实际签到仍需匹配浏览器 User-Agent')

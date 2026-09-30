@@ -281,6 +281,19 @@ class AutoExchangeTests(unittest.TestCase):
 
 class DiagnosticTests(unittest.TestCase):
     @mock.patch('checkin.log')
+    @mock.patch('checkin.requests.get')
+    def test_request_error_does_not_expose_cookie(self, request_get, log):
+        cookie = 'gld:sess=private-cookie; gld:sess.sig=private-signature'
+        request_get.side_effect = checkin.requests.exceptions.InvalidHeader(cookie)
+
+        self.assertIsNone(checkin.GLaDOS(cookie).req('GET', '/api/user/status'))
+
+        printed = str(log.call_args_list)
+        self.assertIn('InvalidHeader', printed)
+        self.assertNotIn('private-cookie', printed)
+        self.assertNotIn('private-signature', printed)
+
+    @mock.patch('checkin.log')
     @mock.patch('checkin.telegram_push')
     @mock.patch('checkin.pushplus')
     @mock.patch('checkin.GLaDOS')
