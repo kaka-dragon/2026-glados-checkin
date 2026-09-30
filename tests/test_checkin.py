@@ -279,5 +279,57 @@ class AutoExchangeTests(unittest.TestCase):
         self.assertFalse(hasattr(client, 'plan_sent'))
 
 
+class DiagnosticTests(unittest.TestCase):
+    @mock.patch('checkin.log')
+    @mock.patch('checkin.telegram_push')
+    @mock.patch('checkin.pushplus')
+    @mock.patch('checkin.GLaDOS')
+    def test_diagnostic_queries_status_without_writes_or_private_logs(
+        self, client_class, pushplus, telegram, log,
+    ):
+        cookie = 'gld:sess=private-cookie; gld:sess.sig=private-signature'
+        client = client_class.return_value
+        client.req.return_value = {
+            'code': 0,
+            'data': {'email': 'private@example.test', 'leftDays': '123'},
+        }
+        with mock.patch.dict(os.environ, {
+            'GLADOS_COOKIE': cookie,
+            'CHECKIN_DIAGNOSTIC_ONLY': 'true',
+            'PUSHPLUS_TOKEN': 'private-token',
+            'EXCHANGE_PLAN': 'plan500',
+        }):
+            self.assertEqual(checkin.main(), 0)
+
+        client.req.assert_called_once_with('GET', '/api/user/status')
+        client.checkin.assert_not_called()
+        client.exchange.assert_not_called()
+        pushplus.assert_not_called()
+        telegram.assert_not_called()
+        printed = str(log.call_args_list)
+        for private in ('private-cookie', 'private-signature', 'private@example.test', 'private-token'):
+            self.assertNotIn(private, printed)
+
+    @mock.patch('checkin.GLaDOS')
+    def test_diagnostic_auth_and_malformed_responses_fail(self, client_class):
+        for response in (
+            None, [], {'code': -2, 'message': '没有权限'},
+            {'code': 0, 'data': None}, {'code': 0, 'data': {}},
+            {'code': -2, 'data': {'email': 'private@example.test'}},
+        ):
+            with self.subTest(response=response):
+                client_class.return_value.req.return_value = response
+                self.assertEqual(checkin.diagnose_accounts(['synthetic-cookie']), 1)
+
+    @mock.patch('checkin.GLaDOS')
+    def test_diagnostic_reports_failure_if_any_account_fails(self, client_class):
+        client_class.return_value.req.side_effect = [
+            {'code': 0, 'data': {'leftDays': 123}},
+            {'code': -2, 'message': '没有权限'},
+        ]
+        self.assertEqual(checkin.diagnose_accounts(['synthetic-first', 'synthetic-second']), 1)
+        self.assertEqual(client_class.return_value.req.call_count, 2)
+
+
 if __name__ == '__main__':
     unittest.main()

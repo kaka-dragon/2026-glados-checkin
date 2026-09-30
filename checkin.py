@@ -445,11 +445,39 @@ def telegram_push(token, chat_id, title, content):
         log(f"❌ Telegram 推送失败: {e}")
         return False
 
+def diagnose_accounts(cookies):
+    """Read authentication status without check-in, redemption or notifications."""
+    success_cnt = 0
+    has_user_agent = bool(os.environ.get('GLADOS_USER_AGENT', '').strip())
+    log('🔎 只读诊断：仅查询登录状态，不签到、不兑换、不推送')
+    log('浏览器 User-Agent: ' + ('已配置' if has_user_agent else '未配置，使用默认值'))
+    for i, cookie in enumerate(cookies, 1):
+        client = GLaDOS(cookie)
+        result = client.req('GET', '/api/user/status')
+        authenticated = (
+            isinstance(result, dict)
+            and result.get('code') == 0
+            and isinstance(result.get('data'), dict)
+            and bool(result['data'])
+        )
+        # Never print response bodies: they may contain email or account data.
+        if authenticated:
+            success_cnt += 1
+            log(f'✅ 账号 {i}: 登录状态查询成功')
+        else:
+            log(f'❌ 账号 {i}: 登录状态查询失败，请检查网络并重新登录更新 Cookie')
+    log('只读查询通过不代表签到设备校验通过；实际签到仍需匹配浏览器 User-Agent')
+    return 0 if success_cnt == len(cookies) else 1
+
+
 def main():
     log("🚀 2026 GLaDOS Checkin Starting...")
     cookies = get_cookies()
     if not cookies:
         return 1
+
+    if os.environ.get('CHECKIN_DIAGNOSTIC_ONLY', '').strip().lower() in ('1', 'true', 'yes'):
+        return diagnose_accounts(cookies)
 
     exchange_plan = get_exchange_plan()
     if exchange_plan:

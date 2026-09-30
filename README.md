@@ -174,6 +174,16 @@ detected”，请打开同一个浏览器的 `chrome://version`，复制“用�
 仓库 **Settings → Secrets and variables → Actions → Variables** 中设置
 `GLADOS_USER_AGENT`。浏览器升级后，应重新登录并同步更新 Cookie 与 User-Agent。
 
+更新后可以先运行只读检查：在 **Actions → GLaDOS 2026 Checkin → Run workflow** 中，
+`dispatch_source` 选 `manual`，勾选 `diagnose_only`。只读检查仅请求登录状态，日志不输出
+Cookie、邮箱或账号余额，也不会签到、兑换积分或发送推送。所有账号状态查询通过时工作流
+成功；查询失败时工作流失败。GitHub 自身仍可能发送工作流失败邮件。
+本地使用时设置 `CHECKIN_DIAGNOSTIC_ONLY=true` 后运行脚本即可。
+
+注意：只读查询成功不代表签到的设备校验也已通过。确认 Cookie 与 User-Agent 对应后，
+再取消勾选 `diagnose_only` 执行一次实际签到；若不希望自动兑换，可先将仓库变量
+`EXCHANGE_PLAN` 设为 `off`。
+
 ### 🎁 积分自动兑换（#11）
 
 签到攒够积分后自动兑换会员天数，实现无感自动续期：
