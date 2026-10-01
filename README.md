@@ -30,7 +30,7 @@
 
 ![签到成功示例](images/success.jpg)
 
-> **每天签到能获得 +12 ~ +20 积分，累积可兑换会员时长！**
+> **签到积分可累积兑换会员时长。每日奖励会随套餐、连续签到和海缆状态变化，请以控制台实际到账为准。**
 
 ---
 
@@ -181,6 +181,16 @@ detected”，请打开同一个浏览器的 `chrome://version`，复制“用�
 仓库 **Settings → Secrets and variables → Actions → Variables** 中设置
 `GLADOS_USER_AGENT`。浏览器升级后，应重新登录并同步更新 Cookie 与 User-Agent。
 
+更新后可以先运行只读检查：在 **Actions → GLaDOS 2026 Checkin → Run workflow** 中，
+`dispatch_source` 选 `manual`，勾选 `diagnose_only`。只读检查仅请求登录状态，日志不输出
+Cookie、邮箱或账号余额，也不会签到、兑换积分或发送推送。所有账号状态查询通过时工作流
+成功；查询失败时工作流失败。GitHub 自身仍可能发送工作流失败邮件。
+本地使用时设置 `CHECKIN_DIAGNOSTIC_ONLY=true` 后运行脚本即可。
+
+注意：只读查询成功不代表签到的设备校验也已通过。确认 Cookie 与 User-Agent 对应后，
+再取消勾选 `diagnose_only` 执行一次实际签到；若不希望自动兑换，可先将仓库变量
+`EXCHANGE_PLAN` 设为 `off`。
+
 ### 🎁 积分自动兑换（#11）
 
 签到攒够积分后自动兑换会员天数，实现无感自动续期：
@@ -294,6 +304,9 @@ koa:sess=旧会话; koa:sess.sig=旧签名; gld:sess=新会话; gld:sess.sig=新
 ```
 
 其他 Cookie 可以保留；`__stripe_mid` 与签到认证无关，但不会造成问题。
+
+也支持将 Cookie-Editor 导出的 JSON 数组整体保存到 `GLADOS_COOKIE`，可以保留缩进和
+换行；整个数组按一个账号处理。多账号请使用上面的 Cookie 请求头格式，每个账号占一行。
 
 **常见错误**：
 

@@ -140,6 +140,12 @@ def get_cookies():
     if not raw:
         log("❌ 未配置 GLADOS_COOKIE")
         return []
+
+    # A Cookie-Editor export is one JSON document. Its formatting newlines
+    # and ampersands inside values are not account separators.
+    if raw.lstrip().startswith(('{', '[')):
+        cookie = extract_cookie(raw)
+        return [cookie] if cookie else []
     
     # Split by enter or &
     sep = '\n' if '\n' in raw else '&'
@@ -191,6 +197,7 @@ def is_non_retryable_checkin_result(result):
         or '没有权限' in message
         or 'permission' in message
         or 'unauthorized' in message
+        or 'automated check-in detected' in message
     )
 
 
@@ -277,7 +284,8 @@ class GLaDOS:
                     return resp.json()
                 log(f"⚠️ {d} 返回 HTTP {resp.status_code}")
             except (requests.RequestException, ValueError) as e:
-                log(f"⚠️ {d} 请求失败: {e}")
+                # InvalidHeader and other request errors may embed Cookie values.
+                log(f"⚠️ {d} 请求失败: {type(e).__name__}")
                 continue
         return None
 
@@ -438,11 +446,41 @@ def telegram_push(token, chat_id, title, content):
         log(f"❌ Telegram 推送失败: {e}")
         return False
 
+def diagnose_accounts(cookies):
+    """Read authentication status without check-in, redemption or notifications."""
+    success_cnt = 0
+    has_user_agent = bool(os.environ.get('GLADOS_USER_AGENT', '').strip())
+    log('🔎 只读诊断：仅查询登录状态，不签到、不兑换、不推送')
+    log('浏览器 User-Agent: ' + ('已配置' if has_user_agent else '未配置，使用默认值'))
+    for i, cookie in enumerate(cookies, 1):
+        client = GLaDOS(cookie)
+        result = client.req('GET', '/api/user/status')
+        authenticated = (
+            isinstance(result, dict)
+            and result.get('code') == 0
+            and isinstance(result.get('data'), dict)
+            and bool(result['data'])
+        )
+        # Never print response bodies: they may contain email or account data.
+        if authenticated:
+            success_cnt += 1
+            log(f'✅ 账号 {i}: 登录状态查询成功')
+        elif is_non_retryable_checkin_result(result):
+            log(f'❌ 账号 {i}: 会话认证被拒绝，请重新登录并更新完整 Cookie')
+        else:
+            log(f'❌ 账号 {i}: 登录状态查询失败，请检查网络并重新登录更新 Cookie')
+    log('只读查询通过不代表签到设备校验通过；实际签到仍需匹配浏览器 User-Agent')
+    return 0 if success_cnt == len(cookies) else 1
+
+
 def main():
     log("🚀 2026 GLaDOS Checkin Starting...")
     cookies = get_cookies()
     if not cookies:
         return 1
+
+    if os.environ.get('CHECKIN_DIAGNOSTIC_ONLY', '').strip().lower() in ('1', 'true', 'yes'):
+        return diagnose_accounts(cookies)
 
     exchange_plan = get_exchange_plan()
     if exchange_plan:

@@ -72,6 +72,21 @@ class CheckinResultTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         sleep.assert_not_called()
 
+    @mock.patch('checkin.time.sleep')
+    def test_automated_detection_without_reason_does_not_retry(self, sleep):
+        failure = {
+            'code': 4,
+            'message': 'Automated check-in detected. Please sign in again to continue.',
+        }
+        client = FakeClient([failure])
+
+        result, success = checkin.checkin_with_retry(client, attempts=3)
+
+        self.assertFalse(success)
+        self.assertEqual(result, failure)
+        self.assertEqual(client.calls, 1)
+        sleep.assert_not_called()
+
 
 class BrowserHeaderTests(unittest.TestCase):
     def test_custom_chrome_user_agent_builds_matching_client_hints(self):
@@ -127,6 +142,50 @@ class CookieTests(unittest.TestCase):
 
         self.assertIn('gld:sess=current', cookie)
         self.assertEqual(checkin.get_session_cookie_kind(cookie), 'gld')
+
+    def test_get_cookies_preserves_formatted_json_as_one_account(self):
+        raw = json.dumps([
+            {'name': 'gld:sess', 'value': 'current'},
+            {'name': 'gld:sess.sig', 'value': 'signature'},
+        ], indent=2)
+
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': raw}):
+            self.assertEqual(
+                checkin.get_cookies(),
+                ['gld:sess=current; gld:sess.sig=signature'],
+            )
+
+    def test_get_cookies_preserves_ampersands_in_json_values(self):
+        raw = json.dumps([
+            {'name': 'gld:sess', 'value': 'current'},
+            {'name': 'gld:sess.sig', 'value': 'signature'},
+            {'name': 'preferences', 'value': 'a&b'},
+        ])
+
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': raw}):
+            self.assertEqual(
+                checkin.get_cookies(),
+                ['gld:sess=current; gld:sess.sig=signature; preferences=a&b'],
+            )
+
+    def test_get_cookies_parses_formatted_legacy_token_json(self):
+        raw = json.dumps({'token': 'legacy'}, indent=2)
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': raw}):
+            self.assertEqual(checkin.get_cookies(), ['koa:sess=legacy'])
+
+    def test_get_cookies_rejects_malformed_json(self):
+        with mock.patch.dict(os.environ, {'GLADOS_COOKIE': '[\n{\n'}):
+            self.assertEqual(checkin.get_cookies(), [])
+
+    def test_get_cookies_preserves_multiple_cookie_headers(self):
+        cookies = [
+            'gld:sess=first; gld:sess.sig=first-signature',
+            'gld:sess=second; gld:sess.sig=second-signature',
+        ]
+        for separator in ('\n', '&'):
+            with self.subTest(separator=separator):
+                with mock.patch.dict(os.environ, {'GLADOS_COOKIE': separator.join(cookies)}):
+                    self.assertEqual(checkin.get_cookies(), cookies)
 
     def test_cookie_header_prefix_is_removed(self):
         raw = 'Cookie: gld:sess=current; gld:sess.sig=signature'
@@ -218,6 +277,71 @@ class AutoExchangeTests(unittest.TestCase):
 
         self.assertIn('积分查询失败', result)
         self.assertFalse(hasattr(client, 'plan_sent'))
+
+
+class DiagnosticTests(unittest.TestCase):
+    @mock.patch('checkin.log')
+    @mock.patch('checkin.requests.get')
+    def test_request_error_does_not_expose_cookie(self, request_get, log):
+        cookie = 'gld:sess=private-cookie; gld:sess.sig=private-signature'
+        request_get.side_effect = checkin.requests.exceptions.InvalidHeader(cookie)
+
+        self.assertIsNone(checkin.GLaDOS(cookie).req('GET', '/api/user/status'))
+
+        printed = str(log.call_args_list)
+        self.assertIn('InvalidHeader', printed)
+        self.assertNotIn('private-cookie', printed)
+        self.assertNotIn('private-signature', printed)
+
+    @mock.patch('checkin.log')
+    @mock.patch('checkin.telegram_push')
+    @mock.patch('checkin.pushplus')
+    @mock.patch('checkin.GLaDOS')
+    def test_diagnostic_queries_status_without_writes_or_private_logs(
+        self, client_class, pushplus, telegram, log,
+    ):
+        cookie = 'gld:sess=private-cookie; gld:sess.sig=private-signature'
+        client = client_class.return_value
+        client.req.return_value = {
+            'code': 0,
+            'data': {'email': 'private@example.test', 'leftDays': '123'},
+        }
+        with mock.patch.dict(os.environ, {
+            'GLADOS_COOKIE': cookie,
+            'CHECKIN_DIAGNOSTIC_ONLY': 'true',
+            'PUSHPLUS_TOKEN': 'private-token',
+            'EXCHANGE_PLAN': 'plan500',
+        }):
+            self.assertEqual(checkin.main(), 0)
+
+        client.req.assert_called_once_with('GET', '/api/user/status')
+        client.checkin.assert_not_called()
+        client.exchange.assert_not_called()
+        pushplus.assert_not_called()
+        telegram.assert_not_called()
+        printed = str(log.call_args_list)
+        for private in ('private-cookie', 'private-signature', 'private@example.test', 'private-token'):
+            self.assertNotIn(private, printed)
+
+    @mock.patch('checkin.GLaDOS')
+    def test_diagnostic_auth_and_malformed_responses_fail(self, client_class):
+        for response in (
+            None, [], {'code': -2, 'message': '没有权限'},
+            {'code': 0, 'data': None}, {'code': 0, 'data': {}},
+            {'code': -2, 'data': {'email': 'private@example.test'}},
+        ):
+            with self.subTest(response=response):
+                client_class.return_value.req.return_value = response
+                self.assertEqual(checkin.diagnose_accounts(['synthetic-cookie']), 1)
+
+    @mock.patch('checkin.GLaDOS')
+    def test_diagnostic_reports_failure_if_any_account_fails(self, client_class):
+        client_class.return_value.req.side_effect = [
+            {'code': 0, 'data': {'leftDays': 123}},
+            {'code': -2, 'message': '没有权限'},
+        ]
+        self.assertEqual(checkin.diagnose_accounts(['synthetic-first', 'synthetic-second']), 1)
+        self.assertEqual(client_class.return_value.req.call_count, 2)
 
 
 if __name__ == '__main__':
