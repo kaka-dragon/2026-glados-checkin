@@ -274,7 +274,9 @@ def summarize_checkin_failure(result):
 
     reason = str(result.get('reason', '')).strip().lower()
     message = str(result.get('message', '')).strip().lower()
-    if reason == 'checkin-challenge-unavailable':
+    if message == 'cloudflare verification failed. nothing was recorded — please retry.':
+        label = 'Cloudflare verification failed. Nothing was recorded — please retry.'
+    elif reason == 'checkin-challenge-unavailable':
         label = '未获取有效签到验证，本次未提交签到，请稍后重试'
     elif reason == 'checkin-challenge-expired':
         label = '签到验证已过期，本次未提交签到，请稍后重试'
