@@ -275,4 +275,4 @@ class PointsHistoryTests(unittest.TestCase):
                 self.assertIn('185 天', body)
                 self.assertIn('148', body)
                 self.assertIn(expected_status, body)
-                self.assertIn('https://glados.cloud/console/checkin', body)
+                self.assertIn('https://glados.network/console/checkin', body)

@@ -41,6 +41,11 @@ DOMAINS = [
     "https://glados.one",
 ]
 
+# 推送正文里展示的签到页面固定为 glados.network（用户指定的常用站点）。
+# 它与 API 请求用的 DOMAINS 切换无关：不管哪个域名响应了状态查询，
+# 提醒里的链接都不变，避免把用户带到别的站点。
+CHECKIN_PAGE_URL = "https://glados.network/console/checkin"
+
 DEFAULT_USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
     'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -1021,7 +1026,7 @@ def notify_status_accounts(cookies):
         else:
             today_checkin_label = '⏳ 今日未签到（暂未查到今日积分入账，请点击下方链接签到）'
 
-        checkin_url = f"{str(getattr(g, 'domain', DOMAINS[0]) or DOMAINS[0]).rstrip('/')}/console/checkin"
+        checkin_url = CHECKIN_PAGE_URL
         gain_summary = summarize_readonly_ledger(g, status_ok, points_ok)
         gain_summary += today_rewards_summary(g)
         log(
