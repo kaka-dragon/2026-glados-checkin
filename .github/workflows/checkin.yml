@@ -2,8 +2,10 @@ name: GLaDOS 2026 Checkin
 
 on:
   schedule:
-    # 北京时间 09:30（UTC 01:30）。一天一次即可，脚本会在失败时自动重试。
-    - cron: '30 1 * * *'
+    # 每天北京时间 08:23（UTC 00:23）只读核对状态并微信提醒（避开整点/半点高峰）
+    # 只查剩余天数、积分与今日是否已签到并附上签到链接，不提交自动签到，避免触发 Turnstile 报错。
+    # 如官方撤下验证且希望恢复定时自动签到，可将仓库变量 ALLOW_SCHEDULED_CHECKIN 设为 true。
+    - cron: '23 0 * * *'
   workflow_dispatch:
     inputs:
       dispatch_source:
@@ -18,6 +20,11 @@ on:
         description: 只检查 Cookie 是否可读取账号状态，不签到、不兑换、不推送
         required: false
         default: false
+        type: boolean
+      notify_status_only:
+        description: 只读取剩余天数、积分与今日签到状态并发送通知（含签到链接），不发起签到请求、不自动兑换
+        required: false
+        default: true
         type: boolean
 
 concurrency:
@@ -49,7 +56,7 @@ jobs:
       - name: Run Tests
         run: python -m unittest discover -s tests -v
 
-      - name: Run Checkin
+      - name: Run Checkin (read-only status reminder)
         run: python checkin.py
         timeout-minutes: 8
         env:
@@ -58,6 +65,9 @@ jobs:
           # Prefer the repository Variable; accept a same-named Secret for compatibility.
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT || secrets.GLADOS_USER_AGENT }}
           CHECKIN_DIAGNOSTIC_ONLY: ${{ inputs.diagnose_only && 'true' || 'false' }}
+          # 默认采用只读状态与微信提醒模式（不发起签到请求，不触发 Turnstile）；
+          # 手动运行(manual)且取消勾选 notify_status_only，或设仓库变量 ALLOW_SCHEDULED_CHECKIN=true 时才尝试完整签到。
+          CHECKIN_NOTIFY_STATUS_ONLY: ${{ ((github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dispatch_source != 'manual')) && (vars.ALLOW_SCHEDULED_CHECKIN || '') != 'true') && 'true' || (inputs.notify_status_only && 'true' || 'false') }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
