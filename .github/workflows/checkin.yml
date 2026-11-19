@@ -2,10 +2,10 @@ name: GLaDOS 2026 Checkin
 
 on:
   schedule:
-    # 每天北京时间 08:23（UTC 00:23）只读核对状态并微信提醒（避开整点/半点高峰）
+    # 每天北京时间 11:30（UTC 03:30）只读核对状态并微信提醒
     # 只查剩余天数、积分与今日是否已签到并附上签到链接，不提交自动签到，避免触发 Turnstile 报错。
     # 如官方撤下验证且希望恢复定时自动签到，可将仓库变量 ALLOW_SCHEDULED_CHECKIN 设为 true。
-    - cron: '23 0 * * *'
+    - cron: '30 3 * * *'
   workflow_dispatch:
     inputs:
       dispatch_source:
