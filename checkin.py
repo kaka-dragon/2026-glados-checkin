@@ -558,6 +558,7 @@ class GLaDOS:
         self.points = "?"
         self.points_change = "?"
         self.points_change_time = "未知"
+        self.last_checkin_time = "未知"
         self.today_positive_change = None
         self.today_rewards_total = None
         self.today_rewards_count = 0
@@ -648,6 +649,7 @@ class GLaDOS:
             # This is the latest ledger entry, not a change caused by this run.
             self.points_change = '?'
             self.points_change_time = '未知'
+            self.last_checkin_time = '未知'
             self.today_positive_change = None
             self.today_rewards_total = None
             self.today_rewards_count = 0
@@ -668,32 +670,54 @@ class GLaDOS:
                 if formatted_dt:
                     self.points_change_time = formatted_dt
 
+                latest_valid_time = None
+                latest_checkin_time = None
+
                 # Observation only: date/amount/business do not link a credit to this run.
-                for item in history[:10]:
+                for index, item in enumerate(history):
                     if not isinstance(item, dict):
                         continue
                     formatted_full, entry_date = format_beijing_timestamp_ms(item.get('time'))
-                    if entry_date:
-                        self.has_dated_history = True
+                    time_hms = formatted_full.removesuffix(' 北京时间') if formatted_full else ''
+                    if time_hms and latest_valid_time is None:
+                        latest_valid_time = time_hms
+
                     entry_num = parse_finite_number(item.get('change'))
                     business = str(item.get('business', '')).strip().lower()
-                    if len(self.recent_entries) < 10:
-                        self.recent_entries.append({
-                            'date': entry_date,
-                            'time': (formatted_full or '').split(' ')[0],
-                            'change': format_points_number(entry_num, signed=True) or '?',
-                            'business': business,
-                        })
-                    if (
-                        entry_date == today_bj
-                        and entry_num is not None
-                        and entry_num > 0
-                        and 'exchange' not in business
-                        and 'refund' not in business
-                    ):
-                        if self.today_positive_change is None:
-                            self.today_positive_change = format_points_number(entry_num, signed=True)
-                        today_reward_values.append(entry_num)
+                    is_checkin_like = (
+                        'checkin' in business
+                        or (
+                            entry_num is not None
+                            and entry_num > 0
+                            and 'exchange' not in business
+                            and 'refund' not in business
+                        )
+                    )
+                    if time_hms and is_checkin_like and latest_checkin_time is None:
+                        latest_checkin_time = time_hms
+
+                    if index < 10:
+                        if entry_date:
+                            self.has_dated_history = True
+                        if len(self.recent_entries) < 10:
+                            self.recent_entries.append({
+                                'date': entry_date,
+                                'time': time_hms,
+                                'change': format_points_number(entry_num, signed=True) or '?',
+                                'business': business,
+                            })
+                        if (
+                            entry_date == today_bj
+                            and entry_num is not None
+                            and entry_num > 0
+                            and 'exchange' not in business
+                            and 'refund' not in business
+                        ):
+                            if self.today_positive_change is None:
+                                self.today_positive_change = format_points_number(entry_num, signed=True)
+                            today_reward_values.append(entry_num)
+
+                self.last_checkin_time = latest_checkin_time or latest_valid_time or '未知'
 
                 if today_reward_values:
                     total = format_points_number(sum(today_reward_values), signed=True)
@@ -835,12 +859,19 @@ def serverchan_push(sendkey, title, content):
         url = f"https://sctapi.ftqq.com/{sendkey}.send"
 
     # 复用完整的多账号报告；先去标签再解码，保留正文里的 HTML 转义字符。
-    text = re.sub(r"<br\s*/?>", "\n", content, flags=re.IGNORECASE)
-    text = re.sub(r"</td>\s*", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"</(?:h[1-6]|p|div|tr)\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r">\s*\n\s*<", "><", content)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</td>\s*", "  ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</(?:h[1-6]|p|tr)\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?div\b[^>]*>", "\n\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
-    lines = [line.strip() for line in html.unescape(text).splitlines()]
-    desp = "  \n".join(line for line in lines if line)
+    text = html.unescape(text)
+    paragraphs = []
+    for block in re.split(r"\n[ \t]*\n+", text):
+        block_lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if block_lines:
+            paragraphs.append("  \n".join(block_lines))
+    desp = "\n\n".join(paragraphs)
 
     try:
         response = requests.post(url, json={'title': title, 'desp': desp}, timeout=10)
@@ -877,9 +908,11 @@ def telegram_push(token, chat_id, title, content):
         text = re.sub(r"<(div|p)[^>]*>", "", text)
         text = re.sub(r"</(div|p)>", "\n", text)
         
-        # 3. Span and small tags
+        # 3. Span, small and table cell/row tags
         text = re.sub(r"<(span|small)[^>]*>", "", text)
         text = re.sub(r"</(span|small)>", "", text)
+        text = re.sub(r"</td>\s*", "  ", text, flags=re.IGNORECASE)
+        text = re.sub(r"</tr>\s*", "\n", text, flags=re.IGNORECASE)
         
         # 4. Final cleaning: Strip all HTML tags EXCEPT the ones supported by Telegram: b, i, u, s, a, code, pre
         text = re.sub(r"<(?!\/?(b|i|u|s|a|code|pre)\b)[^>]+>", "", text)
@@ -995,63 +1028,95 @@ def render_account_card(
 """
 
 
+def render_readonly_status_card(index, client, today_status_text, checkin_url=CHECKIN_PAGE_URL):
+    """Render concise read-only status card for PushPlus/ServerChan/Telegram."""
+    account_label = str(client.email) if client.email != '?' else f'账号 {index}'
+    raw_last_time = getattr(client, 'last_checkin_time', None)
+    if not isinstance(raw_last_time, str) or not raw_last_time or raw_last_time == '未知':
+        fallback_time = getattr(client, 'points_change_time', None)
+        if isinstance(fallback_time, str) and fallback_time and fallback_time != '未知':
+            last_checkin_label = fallback_time.removesuffix(' 北京时间')
+        else:
+            last_checkin_label = '未知'
+    else:
+        last_checkin_label = raw_last_time.removesuffix(' 北京时间')
+
+    days_label = f'{client.left_days} 天' if client.left_days != '?' else '未获取'
+    points_label = f'{client.points} 分' if client.points != '?' else '未获取'
+
+    ledger_block = ''
+    recent = getattr(client, 'recent_entries', None)
+    if isinstance(recent, list) and recent:
+        rows = ''.join(
+            '<tr>'
+            f'<td style="padding:2px 10px 2px 0; color:#555;">{html.escape(str(e.get("time") or e.get("date") or "?"))}</td>'
+            f'<td style="padding:2px 10px; text-align:right; font-weight:bold; color:'
+            f'{"#2e7d32" if str(e.get("change", "")).startswith("+") else "#c62828"};">{html.escape(str(e.get("change", "?")))}</td>'
+            f'<td style="padding:2px 0 2px 10px; color:#777;">{html.escape(str(e.get("business") or "-"))}</td>'
+            '</tr>'
+            for e in recent[:6]
+        )
+        ledger_block = (
+            '\n  <div style="margin-top:12px; padding:10px; background:#fafafa; border-radius:6px;">'
+            '\n    <p style="margin:0 0 6px 0; font-weight:bold; font-size:14px;">近期积分流水：</p>'
+            f'\n    <table style="border-collapse:collapse; font-size:13px;">{rows}</table>'
+            '\n  </div>'
+        )
+
+    return f"""
+<div style="border:1px solid #e0e0e0; padding:14px; margin-bottom:14px; border-radius:8px; background:#fff;">
+  <div>
+    <p style="margin:4px 0; font-size:15px;"><b>账号：</b>{html.escape(account_label)}</p>
+    <p style="margin:4px 0; font-size:15px;"><b>今日状态：</b>{html.escape(today_status_text)}</p>
+    <p style="margin:4px 0; font-size:15px;"><b>最后签到：</b>{html.escape(last_checkin_label)}</p>
+    <p style="margin:4px 0; font-size:15px;"><b>剩余天数：</b>{html.escape(days_label)}</p>
+    <p style="margin:4px 0; font-size:15px;"><b>当前积分：</b>{html.escape(points_label)}</p>
+    <p style="margin:4px 0; font-size:15px;"><b>签到链接：</b><a href="{html.escape(checkin_url)}">{html.escape(checkin_url)}</a></p>
+  </div>{ledger_block}
+</div>
+"""
+
+
 def notify_status_accounts(cookies):
-    """Read account status and points ledger, then push a read-only summary card."""
-    log('📬 只读状态与积分核对推送：仅读取登录状态与积分流水并发送通知，不发起签到请求、不自动兑换')
+    """Read account status and points ledger, then push a concise status reminder."""
+    log('📬 只读状态查询：仅读取账号状态与积分流水，不发起签到请求')
     if not log_user_agent_configuration():
         return 1
-    exchange_plan = get_exchange_plan()
+
     results = []
+    clients = []
     success_cnt = 0
+    checked_in_cnt = 0
+    not_checked_in_cnt = 0
+    failed_cnt = 0
 
     for i, cookie in enumerate(cookies, 1):
         g = GLaDOS(cookie)
         status_ok = g.get_status()
         points_ok = g.get_points() if status_ok else False
         query_ok = bool(status_ok and points_ok)
-        if query_ok:
-            success_cnt += 1
-            msg = '只读状态与积分核对（未发起签到请求，不触发人机验证）'
-        elif status_ok:
-            msg = '登录状态正常，但积分流水读取未成功（未发起签到请求）'
-        else:
-            msg = '登录状态读取未成功，请检查会话配置或网络（未发起签到请求）'
 
         if not status_ok:
-            today_checkin_label = '未知（登录状态读取未成功）'
+            today_status_text = '❌ 查询失败（登录状态读取失败）'
+            failed_cnt += 1
         elif not points_ok:
-            today_checkin_label = '未知（积分流水读取未成功）'
+            today_status_text = '❌ 查询失败（积分流水读取失败）'
+            failed_cnt += 1
         elif isinstance(getattr(g, 'today_positive_change', None), str):
-            today_checkin_label = f'✅ 今日已签到/已有入账（{g.today_positive_change} 分）'
+            today_status_text = f'✅ 已签到（{g.today_positive_change} 分）'
+            success_cnt += 1
+            checked_in_cnt += 1
         else:
-            today_checkin_label = '⏳ 今日未签到（暂未查到今日积分入账，请点击下方链接签到）'
+            today_status_text = '⏳ 未签到'
+            success_cnt += 1
+            not_checked_in_cnt += 1
 
-        checkin_url = CHECKIN_PAGE_URL
-        gain_summary = summarize_readonly_ledger(g, status_ok, points_ok)
-        gain_summary += today_rewards_summary(g)
         log(
             f"{'✅' if query_ok else '❌'} 账号 {i} | 积分: {g.points} | 天数: {g.left_days} | "
-            f"今日状态: {today_checkin_label} | 流水观察: {gain_summary} | 模式: {msg}"
+            f"今日状态: {today_status_text}"
         )
-        exchange_line = ""
-        if exchange_plan:
-            g.exchange_result = '⏭️ 只读核对模式，本次跳过自动兑换'
-            exchange_line = f"""
-    <p style="margin:8px 0; color:#000; font-size:16px;"><b>自动兑换:</b> {html.escape(g.exchange_result)}</p>"""
-        extra_lines = (
-            f'\n    <p style="margin:8px 0; color:#000; font-size:16px;"><b>今日签到状态:</b> {html.escape(today_checkin_label)}</p>'
-            f'\n    <p style="margin:8px 0; color:#000; font-size:16px;"><b>签到链接:</b> <a href="{html.escape(checkin_url)}">{html.escape(checkin_url)}</a></p>'
-        )
-        results.append(render_account_card(
-            i,
-            g,
-            gain_summary,
-            msg,
-            exchange_line=exchange_line,
-            gain_heading="流水观察",
-            result_heading="运行模式",
-            extra_lines=extra_lines,
-        ))
+        clients.append(g)
+        results.append(render_readonly_status_card(i, g, today_status_text, checkin_url=CHECKIN_PAGE_URL))
 
     ptoken = os.environ.get("PUSHPLUS_TOKEN")
     serverchan_sendkey = os.environ.get("SERVERCHAN_SENDKEY", "").strip()
@@ -1062,11 +1127,22 @@ def notify_status_accounts(cookies):
         log("⚠️ 未配置任何通知渠道（PUSHPLUS_TOKEN / SERVERCHAN_SENDKEY / TELEGRAM），无法发送状态推送")
         return 1
 
-    outcome = '只读核对完成' if success_cnt == len(cookies) else '只读核对异常'
-    title = f"GLaDOS状态核对: {outcome} {success_cnt}/{len(cookies)}"
+    if len(cookies) == 1:
+        g0 = clients[0]
+        if checked_in_cnt == 1:
+            title = f"GLaDOS 今日已签到｜剩 {g0.left_days} 天 · {g0.points} 分"
+        elif not_checked_in_cnt == 1:
+            title = f"GLaDOS 今日未签到｜剩 {g0.left_days} 天 · {g0.points} 分"
+        else:
+            title = "GLaDOS 状态查询失败"
+    else:
+        summary_parts = [f"已签 {checked_in_cnt}", f"未签 {not_checked_in_cnt}"]
+        if failed_cnt > 0:
+            summary_parts.append(f"失败 {failed_cnt}")
+        title = f"GLaDOS 状态：{' · '.join(summary_parts)}"
+
     content = "".join(results)
-    content += '<p>说明：本次为只读状态与积分流水核对推送，未调用签到或兑换接口，不会触发 Turnstile 验证。</p>'
-    content += f"<br><small>时间（北京时间 UTC+8）: {beijing_time()}</small>"
+    content += f'<div style="margin-top:10px; color:#666; font-size:12px;"><p style="margin:0;">推送时间：{beijing_time()}</p></div>'
 
     push_ok = True
     if ptoken:

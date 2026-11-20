@@ -196,7 +196,10 @@ class PointsHistoryTests(unittest.TestCase):
             {'code': 0, 'data': {'email': 'readonly@example.test', 'leftDays': '688.0'}},
             {
                 'points': '15',
-                'history': [{'change': '14.0', 'time': 1794499249195}],
+                'history': [
+                    {'change': '-500', 'time': TODAY_MS + 5000, 'business': 'exchange'},
+                    {'change': '14.0', 'time': 1794499249195, 'business': 'checkin'},
+                ],
                 'plans': {'plan100': {'points': 100, 'days': 10}},
             },
         ])
@@ -220,13 +223,27 @@ class PointsHistoryTests(unittest.TestCase):
         push.assert_called_once()
         title = push.call_args.args[1]
         content = push.call_args.args[2]
-        self.assertIn('GLaDOS状态核对: 只读核对完成 1/1', title)
+        self.assertEqual(title, 'GLaDOS 今日未签到｜剩 688 天 · 15 分')
         self.assertIn('readonly@example.test', content)
-        self.assertIn('15', content)
-        self.assertNotIn('(+14)', content)
-        self.assertIn('本次为只读核对（未发起签到请求）', content)
-        self.assertIn('历史记录，不代表本次新增', content)
-        self.assertIn('只读核对模式，本次跳过自动兑换', content)
+        self.assertIn('⏳ 未签到', content)
+        self.assertIn('2026-11-13 00:00:49', content)
+        self.assertNotIn('2026-11-13 00:00:49 北京时间', content)
+        self.assertIn('688 天', content)
+        self.assertIn('15 分', content)
+        self.assertIn('https://glados.network/console/checkin', content)
+        self.assertIn('近期积分流水：', content)
+        self.assertIn('推送时间：2026-11-14 16:00:00', content)
+        for noisy in (
+            '只读状态与积分核对',
+            '不会触发 Turnstile 验证',
+            '完整性未确认',
+            '流水观察',
+            '历史记录，不代表本次新增',
+            '跳过自动兑换',
+            '兑换选项',
+            '运行模式',
+        ):
+            self.assertNotIn(noisy, content)
         self.assertNotIn('readonly@example.test', str(log_mock.call_args_list))
 
     def test_notify_status_only_returns_nonzero_when_no_push_channel_configured(self):
@@ -245,20 +262,45 @@ class PointsHistoryTests(unittest.TestCase):
                 mock.patch('checkin.log'):
             self.assertEqual(checkin.main(), 1)
 
-    def test_notify_status_only_serverchan_includes_today_status_and_checkin_link(self):
-        for history_rows, expected_status in [
-            ([], '今日未签到'),
-            ([{'change': '2', 'time': TODAY_MS, 'business': 'checkin'}], '今日已签到'),
-        ]:
-            with self.subTest(expected_status=expected_status):
+    def test_notify_status_only_serverchan_formatting_and_titles(self):
+        yesterday_ms = int(datetime(2026, 11, 13, 8, 15, 20, tzinfo=timezone(timedelta(hours=8))).timestamp() * 1000)
+        cases = [
+            (
+                'not_checked_in',
+                {'code': 0, 'data': {'email': 'readonly@example.test', 'leftDays': '185.0'}},
+                {'points': '148', 'history': [{'change': '2', 'time': yesterday_ms, 'business': 'checkin'}], 'plans': {}},
+                'GLaDOS 今日未签到｜剩 185 天 · 148 分',
+                '⏳ 未签到',
+                '2026-11-13 08:15:20',
+                0,
+            ),
+            (
+                'checked_in',
+                {'code': 0, 'data': {'email': 'readonly@example.test', 'leftDays': '185.0'}},
+                {'points': '150', 'history': [{'change': '2', 'time': TODAY_MS, 'business': 'checkin'}], 'plans': {}},
+                'GLaDOS 今日已签到｜剩 185 天 · 150 分',
+                '✅ 已签到（+2 分）',
+                '2026-11-14 09:30:00',
+                0,
+            ),
+            (
+                'failed',
+                {'request_failed': True, 'reason': 'request-failed'},
+                None,
+                'GLaDOS 状态查询失败',
+                '❌ 查询失败（登录状态读取失败）',
+                '未知',
+                1,
+            ),
+        ]
+        for label, status_payload, points_payload, expected_title, expected_status, expected_last_time, expected_rc in cases:
+            with self.subTest(case=label):
                 client = checkin.GLaDOS(COOKIE)
                 client.domain = 'https://glados.cloud'
                 client.checkin = mock.Mock(side_effect=AssertionError('checkin must not be called'))
                 client.exchange = mock.Mock(side_effect=AssertionError('exchange must not be called'))
-                client.req = mock.Mock(side_effect=[
-                    {'code': 0, 'data': {'email': 'readonly@example.test', 'leftDays': '185.0'}},
-                    {'points': '148', 'history': history_rows, 'plans': {'plan500': {'points': 500, 'days': 100}}},
-                ])
+                responses = [status_payload] if points_payload is None else [status_payload, points_payload]
+                client.req = mock.Mock(side_effect=responses)
                 post_resp = mock.Mock()
                 post_resp.json.return_value = {'code': 0, 'data': {'pushid': 'synthetic'}}
                 with mock.patch('checkin.beijing_now', return_value=FIXED_NOW), \
@@ -270,9 +312,88 @@ class PointsHistoryTests(unittest.TestCase):
                         mock.patch('checkin.GLaDOS', return_value=client), \
                         mock.patch('checkin.requests.post', return_value=post_resp) as post, \
                         mock.patch('checkin.log'):
-                    self.assertEqual(checkin.main(), 0)
-                body = post.call_args.kwargs['json']['desp']
-                self.assertIn('185 天', body)
-                self.assertIn('148', body)
+                    self.assertEqual(checkin.main(), expected_rc)
+                sent = post.call_args.kwargs['json']
+                self.assertEqual(sent['title'], expected_title)
+                body = sent['desp']
                 self.assertIn(expected_status, body)
-                self.assertIn('https://glados.network/console/checkin', body)
+                self.assertIn(f'最后签到：{expected_last_time}', body)
+                self.assertIn('签到链接：https://glados.network/console/checkin', body)
+                self.assertIn('推送时间：2026-11-14 16:00:00', body)
+                self.assertNotIn('<', body)
+                self.assertNotIn('>', body)
+                blocks = body.split('\n\n')
+                self.assertIn('账号：', blocks[0])
+                self.assertIn('签到链接：https://glados.network/console/checkin', blocks[0])
+                self.assertIn('  \n', blocks[0])
+                if points_payload and points_payload['history']:
+                    self.assertEqual(len(blocks), 3)
+                    self.assertTrue(blocks[1].startswith('近期积分流水：'))
+                    self.assertIn(f'{expected_last_time}  +2  checkin', blocks[1])
+                    self.assertEqual(blocks[2], '推送时间：2026-11-14 16:00:00')
+                else:
+                    self.assertEqual(len(blocks), 2)
+                    self.assertEqual(blocks[1], '推送时间：2026-11-14 16:00:00')
+
+    def test_notify_status_only_multi_account_summary_title_and_recent_entries_cap(self):
+        history_eight = [
+            {'change': '2', 'time': TODAY_MS - i * 86400 * 1000, 'business': 'checkin'}
+            for i in range(8)
+        ]
+        c1 = checkin.GLaDOS(COOKIE)
+        c1.req = mock.Mock(side_effect=[
+            {'code': 0, 'data': {'email': 'a@example.test', 'leftDays': '100.0'}},
+            {'points': '200', 'history': history_eight, 'plans': {}},
+        ])
+        c2 = checkin.GLaDOS(COOKIE)
+        c2.req = mock.Mock(side_effect=[
+            {'code': 0, 'data': {'email': 'b@example.test', 'leftDays': '50.0'}},
+            {'points': '80', 'history': [], 'plans': {}},
+        ])
+        post_resp = mock.Mock()
+        post_resp.json.return_value = {'code': 0, 'data': {'pushid': 'synthetic'}}
+        with mock.patch('checkin.beijing_now', return_value=FIXED_NOW), \
+                mock.patch.dict(os.environ, {
+                    'GLADOS_COOKIE': COOKIE + '&' + COOKIE,
+                    'CHECKIN_NOTIFY_STATUS_ONLY': 'true',
+                    'SERVERCHAN_SENDKEY': 'SCT123synthetic-sendkey',
+                }, clear=True), \
+                mock.patch('checkin.GLaDOS', side_effect=[c1, c2]), \
+                mock.patch('checkin.requests.post', return_value=post_resp) as post, \
+                mock.patch('checkin.log'):
+            self.assertEqual(checkin.main(), 0)
+        sent = post.call_args.kwargs['json']
+        self.assertEqual(sent['title'], 'GLaDOS 状态：已签 1 · 未签 1')
+        body = sent['desp']
+        self.assertIn('a@example.test', body)
+        self.assertIn('b@example.test', body)
+        # Recent entries retain HH:MM:SS and cap display to 6 rows
+        self.assertEqual(len(c1.recent_entries), 8)
+        self.assertEqual(c1.recent_entries[0]['time'], '2026-11-14 09:30:00')
+        self.assertIn('2026-11-09 09:30:00  +2  checkin', body)
+        self.assertNotIn('2026-11-08 09:30:00', body)
+
+    def test_last_checkin_time_prefers_checkin_over_exchange_and_falls_back(self):
+        client = checkin.GLaDOS(COOKIE)
+        exchange_ms = TODAY_MS + 5000
+        client.req = mock.Mock(return_value={
+            'points': '50',
+            'history': [
+                {'change': '-500', 'time': exchange_ms, 'business': 'exchange'},
+                {'change': '2', 'time': TODAY_MS, 'business': 'checkin'},
+            ],
+            'plans': {},
+        })
+        with mock.patch('checkin.beijing_now', return_value=FIXED_NOW):
+            self.assertTrue(client.get_points())
+        self.assertEqual(client.last_checkin_time, '2026-11-14 09:30:00')
+
+        # Fallback to latest valid ledger timestamp when only exchange/refund exists
+        client.req = mock.Mock(return_value={
+            'points': '50',
+            'history': [{'change': '-500', 'time': exchange_ms, 'business': 'exchange'}],
+            'plans': {},
+        })
+        with mock.patch('checkin.beijing_now', return_value=FIXED_NOW):
+            self.assertTrue(client.get_points())
+        self.assertEqual(client.last_checkin_time, '2026-11-14 09:30:05')
